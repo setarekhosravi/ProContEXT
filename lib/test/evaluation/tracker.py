@@ -4,10 +4,18 @@ from collections import OrderedDict
 from lib.test.evaluation.environment import env_settings
 import time
 import cv2 as cv
+from datetime import datetime
 
 from lib.utils.lmdb_utils import decode_img
 from pathlib import Path
 import numpy as np
+
+now = datetime.now()
+now = now.strftime("%Y-%m-%d_%H_%M_%S")
+
+_tracker_disp_colors = {1: (0, 255, 0), 2: (0, 0, 255), 3: (255, 0, 0),
+                        4: (255, 255, 255), 5: (0, 0, 0), 6: (0, 255, 128),
+                        7: (123, 123, 123), 8: (255, 128, 0), 9: (128, 0, 255)}
 
 
 def trackerlist(name: str, parameter_name: str, dataset_name: str, run_ids = None, display_name: str = None,
@@ -145,13 +153,14 @@ class Tracker:
 
         return output
 
-    def run_video(self, videofilepath, optional_box=None, debug=None, visdom_info=None, save_results=False):
+    def run_video(self, videofilepath, optional_box=None, debug=None, visdom_info=None, save_results=False, gt_path: str = None, update_rate: int = None):
         """Run the tracker with the vieofile.
         args:
             debug: Debug level.
         """
 
         params = self.get_parameters()
+        frame_number = 0
 
         debug_ = debug
         if debug is None:
@@ -175,7 +184,34 @@ class Tracker:
         assert os.path.isfile(videofilepath), "Invalid param {}".format(videofilepath)
         ", videofilepath must be a valid videofile"
 
+        def get_ground_truth(path):   
+            file = open(path, "r")
+            gTruth = []
+            for item in file:
+                item = item.strip()
+                item = item.strip(";")
+                item = eval(item)
+                gTruth.append(item)
+
+            return gTruth
+
+        def groundTruth():
+            path = gt_path
+            gTruth = get_ground_truth(path)
+            for j in range(0,len(gTruth)):
+                if len(gTruth[j])!=0:
+                    gTruth[j] = gTruth[j][1:5]
+
+            return gTruth
+        
+        if update_rate is None:
+            raise ValueError("Unknown update_rate, you should enter value")
+        else:
+            gt_check = True
+
+        gTruth = groundTruth()
         output_boxes = []
+        non_gt = False
 
         cap = cv.VideoCapture(videofilepath)
         display_name = 'Display: ' + tracker.params.tracker_name
@@ -194,7 +230,7 @@ class Tracker:
             assert isinstance(optional_box, (list, tuple))
             assert len(optional_box) == 4, "valid box's foramt is [x,y,w,h]"
             tracker.initialize(frame, _build_init_info(optional_box))
-            output_boxes.append(optional_box)
+            # output_boxes.append(optional_box)
         else:
             while True:
                 # cv.waitKey()
@@ -202,12 +238,34 @@ class Tracker:
 
                 cv.putText(frame_disp, 'Select target ROI and press ENTER', (20, 30), cv.FONT_HERSHEY_COMPLEX_SMALL,
                            1.5, (0, 0, 0), 1)
+                if not gt_path:
+                    x, y, w, h = cv.selectROI(display_name, frame_disp, fromCenter=False)
+                else:
+                    if len(gTruth[frame_number])!=0:
+                        non_gt = False
+                        x, y, w, h = gTruth[frame_number]
+                    else:
+                        non_gt = True
+                        init_state = [1, 1, 10, 10]
+                        initial_state=tracker.initialize(frame, _build_init_info(init_state))
 
-                x, y, w, h = cv.selectROI(display_name, frame_disp, fromCenter=False)
+                        while len(gTruth[frame_number])==0:
+                            ret, frame = cap.read()
+                            if not ret:
+                                break
+                            frame_number +=1
+                            save = []
+                            output_boxes.append(save)
+                        x, y, w, h = gTruth[frame_number]
+
+                        non_gt = False
                 init_state = [x, y, w, h]
-                tracker.initialize(frame, _build_init_info(init_state))
-                output_boxes.append(init_state)
+                initial_state=tracker.initialize(frame, _build_init_info(init_state))
+                save_state = [0.0, x, y, x+w, y+h, 1]
+                output_boxes.append(save_state)
                 break
+
+        first_time = True
         time_list = []
         while True:
             t1 = time.time()
@@ -216,15 +274,45 @@ class Tracker:
             if frame is None:
                 break
 
+            frame_number += 1
             frame_disp = frame.copy()
 
-            # Draw box
-            out = tracker.track(frame)
-            state = [int(s) for s in out['target_bbox']]
-            output_boxes.append(state)
+            if frame_number%update_rate == 0:
+                gt_check = True
+            else:
+                gt_check = False
 
-            cv.rectangle(frame_disp, (state[0], state[1]), (state[2] + state[0], state[3] + state[1]),
-                         (0, 255, 0), 5)
+            if first_time:
+                out = tracker.track(frame, initial_state)
+                non_gt = False
+                first_time = False
+
+            if gt_check:
+                if len(gTruth[frame_number])==0:
+                    non_gt = True
+                
+                else:
+                    non_gt = False
+                    x, y, w, h = gTruth[frame_number]
+                    gt_state = [x, y, w, h]
+                    out = tracker.initialize(frame,_build_init_info(gt_state))
+
+
+            # Draw box
+            if not non_gt:
+                out = tracker.track(frame)         
+                state =[int(s) for s in out['target_bbox']]
+                # save = [0]
+                # save.extend([out['target_bbox'][0], out['target_bbox'][1], out['target_bbox'][2] + out['target_bbox'][0], out['target_bbox'][3] + out['target_bbox'][1], 1])    
+                # print(save)
+                # output_boxes.append(save)
+                if gt_check:
+                    cv.rectangle(frame_disp, (state[0], state[1]), (state[2] + state[0], state[3] + state[1]),
+                                _tracker_disp_colors[2], 5)
+                else:
+                    cv.rectangle(frame_disp, (state[0], state[1]), (state[2] + state[0], state[3] + state[1]),
+                                _tracker_disp_colors[1], 5)
+
 
             font_color = (0, 0, 0)
             cv.putText(frame_disp, 'Tracking!', (20, 30), cv.FONT_HERSHEY_COMPLEX_SMALL, 1,
@@ -254,12 +342,23 @@ class Tracker:
             t2 = time.time()
             time_list.append(t2-t1)
 
+            bboxes = out['target_bbox']
+            conf = out["score"]
+            cls = 0.0
+            
+            if non_gt==False:
+                output_boxes.append([cls,bboxes[0],bboxes[1],bboxes[0]+bboxes[2],bboxes[1]+bboxes[3],conf])
+
+            if non_gt:
+                save=[]
+                output_boxes.append(save)
+
 
         # When everything done, release the capture
+        avg_time = np.sum(time_list)/len(time_list)
+        print("Avg inference time: ", avg_time, " FPS: ", 1/avg_time)
         cap.release()
         cv.destroyAllWindows()
-        avg = np.sum(time_list)/len(time_list)
-        print("fps: ", 1/avg)
 
         if save_results:
             if not os.path.exists(self.results_dir):
@@ -267,10 +366,15 @@ class Tracker:
             video_name = Path(videofilepath).stem
             base_results_path = os.path.join(self.results_dir, 'video_{}'.format(video_name))
 
-            tracked_bb = np.array(output_boxes).astype(int)
-            bbox_file = '{}.txt'.format(base_results_path)
-            np.savetxt(bbox_file, tracked_bb, delimiter='\t', fmt='%d')
-
+            if not os.path.exists(base_results_path):
+                os.makedirs(base_results_path)
+            bbox_file = '{}.txt'.format(base_results_path+'/'+video_name+now)
+            with open (bbox_file, 'w+') as tx:
+                for i in output_boxes:
+                    if len(i)==0:
+                        tx.write(str(i)+'\n')
+                    else:
+                        tx.write('['+str(i)+']'+'\n')
 
     def get_parameters(self):
         """Get parameters."""
