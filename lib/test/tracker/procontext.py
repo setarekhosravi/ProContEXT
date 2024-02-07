@@ -1,4 +1,5 @@
 import math
+import numpy as np
 
 from lib.models.procontext import build_procontext
 from lib.test.tracker.basetracker import BaseTracker
@@ -139,7 +140,10 @@ class ProContEXT(BaseTracker):
                         self.step = False
                         break
 
-        return {"target_bbox": self.state}
+        score_pred_map = pred_score_map.cpu().numpy()
+        max_score = np.max(score_pred_map)
+
+        return {"target_bbox": self.state, "score_calc": max_score, "conf_score": conf_score}
 
     def map_box_back(self, pred_box: list, resize_factor: float):
         cx_prev, cy_prev = self.state[0] + 0.5 * self.state[2], self.state[1] + 0.5 * self.state[3]
